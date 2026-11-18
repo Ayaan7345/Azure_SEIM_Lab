@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+# =============================================================================
+# Wazuh Integrator — turn each qualifying alert into a ticket.
+# Install to: /var/ossec/integrations/custom-ticket  (chmod 750, owner root:wazuh)
+#
+# Wazuh calls:  custom-ticket <alert-file> <api-key> <hook-url> <level> <rule_id>...
+# Real alert JSON is in the file at argv[1].
+#
+# Default sink here is a generic JSON webhook — point HOOK_URL at your ticketing
+# tool (TheHive, Jira, ServiceNow, n8n, Slack, a Discord webhook, ...). The
+# script shapes a clean ticket payload and POSTs it.
+# =============================================================================
+
+import json
+import sys
+import urllib.request
+from datetime import datetime, timezone
+
+HOOK_URL = "https://YOUR-TICKET-ENDPOINT.example/soc/tickets"   # <-- change me
+MIN_LEVEL = 10   # only ticket on noteworthy+
+
+
+def build_ticket(alert: dict) -> dict:
+    rule = alert.get("rule", {})
+    data = alert.get("data", {})
+    srcip = data.get("srcip") or data.get("src_ip") or alert.get("srcip", "unknown")
+    return {
+        "title": f"[{rule.get('level','?')}] {rule.get('description','Wazuh alert')}",
+        "severity": int(rule.get("level", 0)),
+        "rule_id": rule.get("id"),
+        "mitre": [m.get("id") for m in rule.get("mitre", {}).get("id", [])]
+                 if isinstance(rule.get("mitre", {}).get("id"), list) else rule.get("mitre"),
+        "source_ip": srcip,
+        "agent": alert.get("agent", {}).get("name", "honeyVM"),
+        "detected_at": alert.get("timestamp", datetime.now(timezone.utc).isoformat()),
+        "description": rule.get("description"),
+        "raw": alert,
+        "status": "open",
+        "source": "wazuh-tpot-soc",
+    }
+
+
+def main() -> int:
+    if len(sys.argv) < 2:
+        print("usage: custom-ticket <alert-file> ...", file=sys.stderr)
+        return 2
+
+    try:
+        with open(sys.argv[1]) as fh:
+            alert = json.load(fh)
+    except Exception as exc:  # noqa: BLE001
+        print(f"cannot read alert file: {exc}", file=sys.stderr)
+        return 1
+
+    level = int(alert.get("rule", {}).get("level", 0))
+    if level < MIN_LEVEL:
+        return 0   # below threshold: no ticket
+
+    ticket = build_ticket(alert)
+    payload = json.dumps(ticket).encode()
+    req = urllib.request.Request(
+        HOOK_URL, data=payload,
+        headers={"Content-Type": "application/json", "User-Agent": "wazuh-integrator"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            print(f"ticket created: HTTP {resp.status}", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001
+        print(f"ticket POST failed: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
