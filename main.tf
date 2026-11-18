@@ -35,18 +35,18 @@ resource "azurerm_network_security_group" "nsg" {
   }
 }
 resource "azurerm_network_security_rule" "ssh" {
-  name                       = "SSH"
-  priority                   = 1001
-  direction                  = "Inbound"
-  access                     = "Allow"
-  protocol                   = "Tcp"
-  source_port_range          = "*"
-  destination_port_range     = "22"
-  source_address_prefix      = "*"
-  destination_address_prefix = "*"
-  resource_group_name        = azurerm_resource_group.rg.name
+  name                        = "SSH"
+  priority                    = 1001
+  direction                   = "Inbound"
+  access                      = "Allow"
+  protocol                    = "Tcp"
+  source_port_range           = "*"
+  destination_port_range      = "22"
+  source_address_prefix       = "*"
+  destination_address_prefix  = "*"
+  resource_group_name         = azurerm_resource_group.rg.name
   network_security_group_name = azurerm_network_security_group.nsg.name
-  
+
 }
 resource "azurerm_network_security_rule" "honeypotWebServer" {
   name                        = "honeypotWebServer"
@@ -60,7 +60,7 @@ resource "azurerm_network_security_rule" "honeypotWebServer" {
   destination_address_prefix  = "*"
   resource_group_name         = azurerm_resource_group.rg.name
   network_security_group_name = azurerm_network_security_group.nsg.name
-  
+
 }
 resource "azurerm_network_security_rule" "honeypotRuleSSH" {
   name                        = "honeypotSSH"
@@ -74,7 +74,7 @@ resource "azurerm_network_security_rule" "honeypotRuleSSH" {
   destination_address_prefix  = "*"
   resource_group_name         = azurerm_resource_group.rg.name
   network_security_group_name = azurerm_network_security_group.nsg.name
-  
+
 }
 resource "azurerm_network_security_rule" "honeypotRule" {
   name                        = "honeypotALL"
@@ -88,7 +88,7 @@ resource "azurerm_network_security_rule" "honeypotRule" {
   destination_address_prefix  = "*"
   resource_group_name         = azurerm_resource_group.rg.name
   network_security_group_name = azurerm_network_security_group.nsg.name
-  
+
 }
 
 # Create a network interface
@@ -96,7 +96,7 @@ resource "azurerm_network_interface" "nic" {
   name                = var.nic_name
   location            = var.location
   resource_group_name = azurerm_resource_group.rg.name
-  
+
 
   ip_configuration {
     name                          = "internal"
@@ -145,9 +145,12 @@ resource "azurerm_linux_virtual_machine" "vm" {
   os_disk {
     caching              = "ReadWrite"
     storage_account_type = "Standard_LRS"
+    # T-Pot requires ~128 GB free disk space; the Azure default (~30 GB) is
+    # too small and the install fails partway through.
+    disk_size_gb = 128
   }
 
-  computer_name  = var.vm_name
+  computer_name = var.vm_name
 
   source_image_reference {
     publisher = "Canonical"
@@ -155,41 +158,20 @@ resource "azurerm_linux_virtual_machine" "vm" {
     sku       = "22_04-lts-gen2"
     version   = "latest"
   }
-  depends_on = [ azurerm_network_interface_security_group_association.attach_nsg, azurerm_public_ip.public_ip]
-}
-#Created an installer for tpotce honeypot so now it is fully automated
-resource "null_resource" "install_tpotce_honeypot" {
-  depends_on = [
-    azurerm_linux_virtual_machine.vm,
-    azurerm_public_ip.public_ip,
-    azurerm_network_interface.nic,
-    azurerm_network_interface_security_group_association.attach_nsg
-  ]
 
-  provisioner "remote-exec" {
-    inline = [
-      "sudo apt-get update -y",
-      "sudo apt-get install -y git",
-      "git clone https://github.com/telekom-security/tpotce",
-      "cd tpotce",
-      "./install.sh <<EOF",
-      "y",
-      "h",
-      "azureuser",
-      "y",
-      "hellohoney",
-      "hellohoney",
-      "EOF",
-      "sudo reboot"
-      
-    ]
+  # T-Pot install is handed to cloud-init (cloud-init/tpot.yaml) instead of a
+  # remote-exec provisioner: cleaner apply output, no SSH race, reboot handled.
+  custom_data = base64encode(templatefile("${path.module}/cloud-init/tpot.yaml", {
+    admin_username = var.admin_username
+    admin_password = var.admin_password
+    tpot_branch    = var.tpot_branch
+  }))
 
-    connection {
-      type        = "ssh"
-      user        = "azureuser"
-      private_key = file("~/.ssh/id_rsa")
-      host        = azurerm_public_ip.public_ip.ip_address
-    }
-  }
+  depends_on = [azurerm_network_interface_security_group_association.attach_nsg, azurerm_public_ip.public_ip]
 }
+# T-Pot installation is performed by cloud-init on first boot (see
+# cloud-init/tpot.yaml, wired into the VM as `custom_data` above).
+# The old remote-exec provisioner was removed: it piped answers to interactive
+# prompts that T-Pot later changed, raced the SSH service, and dumped raw
+# installer output into the Terraform apply log.
  

@@ -65,8 +65,13 @@ variable "admin_username" {
 }
 variable "admin_password" {
   description = "password for login to honeypot"
-  type = string
-  default = "hellohoney"
+  type        = string
+  default     = "hellohoney"
+}
+variable "tpot_branch" {
+  description = "T-Pot git branch/tag/commit to install (pin a tag for reproducibility)."
+  type        = string
+  default     = "master"
 }
 variable "log_analytics_workspace_name" {
   description = "The name of the Log Analytics Workspace."

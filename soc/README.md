@@ -3,6 +3,11 @@
 Extends the existing Azure `Azure_SEIM_Lab` (T-Pot CE honeypot) into a working
 Security Operations Center with detection, ticketing, and automated response.
 
+> The honeypot itself is provisioned by the repo root `main.tf` + `cloud-init/tpot.yaml`
+> (unattended `./install.sh -s -t h`). This `soc/` layer adds the SIEM, detection,
+> ticketing, and response on top. See the root [`README.md`](../README.md) for
+> "Keeping T-Pot Current" and how to reach the honeypot.
+
 ## Architecture
 
 ```

@@ -23,34 +23,66 @@ This repository contains Terraform code to set up an Azure honeypot environment 
 
 5. Run `terraform apply` to create the Azure resources. Review the execution plan and enter `yes` to confirm.
 
-6. After the deployment is complete, Terraform will output the public IP address and SSH command to connect to the virtual machine.
+6. After the deployment is complete, Terraform will output the public IP address and SSH command to connect to the virtual machine. **The VM then installs T-Pot automatically via cloud-init** — see [Accessing the Lab](#accessing-the-lab) below.
 
-## Configuration
----
-The `variables.tf` file contains the default values for various resources. You can modify these values according to your requirements. For example, you can change the resource group name, location, virtual machine size, and more.
-
-## Usage
+## Accessing the Lab
 ---
 
-After Configuration and Deployment, you can connect to the virtual machine using the SSH command provided by Terraform. To find the command run `terraform output`. For example, it will look like this:
+Provisioning is fully automatic. On first boot, cloud-init installs T-Pot CE
+(~15–30 min), then the machine **reboots itself** to finish. Watch progress
+from another shell:
 
-- **Login to Web Server:** 
-  - Username: `azureuser`
-  - Password: `hellohoney`
-
-SSH Command: 
 ```
-ssh azureuser@40.117.199.224
+ssh azureuser@<vm_ip> 'tail -f /var/log/tpot-bootstrap.log'
 ```
 
-SSH Command (After Restart for Honey Install): 
+Once it has rebooted, get the connection details from Terraform:
+
 ```
-ssh -p 64295 azureuser@40.117.199.224
+terraform output
 ```
 
-VM Public IP: `40.117.199.224`
+- **T-Pot web UI (landing page):** `https://<vm_ip>:64297`
+  - Username `azureuser` / Password `hellohoney`
+    (set by the `admin_username` and `admin_password` variables)
+- **SSH (after T-Pot moves it off port 22):** `ssh -p 64295 azureuser@<vm_ip>`
 
-Web Server Login URL: https://40.117.199.224:64297
+> T-Pot relocates SSH from `22` to `64295` and takes over the firewall. Before
+> the install finishes, plain `ssh azureuser@<vm_ip>` (port 22) still works.
+
+## Keeping T-Pot Current
+---
+
+- `terraform apply` runs `git clone` on branch `master` **at provision time**, so
+  a fresh deployment always installs the latest T-Pot. It is **not pinned** — for
+  a reproducible build, set `tpot_branch` to a release tag:
+  `terraform apply -var 'tpot_branch=24.04.1'`.
+- To **update a sensor that is already running**, use T-Pot's own updater:
+  ```
+  ssh -p 64295 azureuser@<vm_ip>
+  cd ~/tpotce
+  curl -fsSL -o update.sh https://raw.githubusercontent.com/telekom-security/tpotce/master/update.sh
+  chmod +x update.sh && ./update.sh -y -b master
+  ```
+- The installer runs **unattended** via `./install.sh -s -t h -u <user> -p <pass>`
+  (see [`cloud-init/tpot.yaml`](cloud-init/tpot.yaml)) rather than piping answers
+  to interactive prompts, which change between T-Pot releases.
+
+## SOC Layer (Wazuh SIEM + Sentinel playbooks)
+---
+
+The [`soc/`](soc/) directory extends this honeypot into a working SOC:
+
+- **Wazuh** SIEM/XDR on a separate, locked-down VM — ingests the T-Pot logs,
+  detects (brute force, malware, Suricata, multi-honeypot correlation), opens a
+  ticket per alert, and blocks attacker IPs in the honeypot NSG via Active Response.
+- **Microsoft Sentinel** playbooks (Logic Apps) for SOAR — incident-triggered
+  remediation, wired with automation rules.
+
+See [`soc/README.md`](soc/README.md) for the architecture and deploy order.
+
+> **Cost note:** Sentinel bills **per GB ingested**. Never ship raw honeypot logs
+> to Sentinel — forward Wazuh *alerts* only.
 
 --- 
 ![Image of Dashboard](assets/dashboard.png)

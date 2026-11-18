@@ -1,0 +1,53 @@
+#cloud-config
+###############################################################################
+# T-Pot CE unattended bootstrap — runs ONCE on the honeypot VM's first boot.
+#
+# Why cloud-init instead of a Terraform `remote-exec` provisioner:
+#   * No SSH dependency during apply (no flaky "connection refused" race).
+#   * Terraform apply output stays clean; the install log lives on the box.
+#   * Reboot is handled gracefully (backgrounded at the end).
+#   * Uses T-Pot's OWN unattended flags instead of piping answers to prompts
+#     that change between releases.
+#
+# Logs: /var/log/cloud-init-output.log  and  /var/log/tpot-bootstrap.log
+###############################################################################
+package_update: false
+write_files:
+  - path: /usr/local/sbin/tpot-bootstrap.sh
+    owner: root:root
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      exec > >(tee -a /var/log/tpot-bootstrap.log) 2>&1
+      echo "=== T-Pot bootstrap starting ==="
+
+      # cloud-init / unattended-upgrades may still hold the apt lock.
+      while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 \
+         || fuser /var/lib/apt/lists/lock     >/dev/null 2>&1; do
+        echo "waiting for apt lock to be released..."
+        sleep 5
+      done
+
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -y
+      apt-get install -y git
+
+      # T-Pot refuses to run as root and installs into the invoking user's $HOME,
+      # so run the whole clone+install as the admin user (who has passwordless
+      # sudo on Azure images).
+      sudo -u ${admin_username} -H bash -lc '
+        set -euo pipefail
+        cd ~
+        rm -rf tpotce
+        git clone --depth 1 --branch "${tpot_branch}" https://github.com/telekom-security/tpotce
+        cd tpotce
+        ./install.sh -s -t h -u ${admin_username} -p "${admin_password}"
+      '
+
+      echo "=== T-Pot bootstrap finished; rebooting to complete install ==="
+      # Background the reboot so cloud-init can exit cleanly first.
+      nohup sh -c 'sleep 5; systemctl reboot' >/dev/null 2>&1 &
+runcmd:
+  - [ bash, /usr/local/sbin/tpot-bootstrap.sh ]
+final_message: "T-Pot bootstrap complete in $UPTIME seconds — VM rebooting."
