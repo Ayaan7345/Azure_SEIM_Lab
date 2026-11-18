@@ -1,0 +1,81 @@
+<!--
+  T-Pot detection rules for Wazuh.
+  Install to: /var/ossec/etc/rules/tpot_rules.xml
+  Rule ID range 100000-109999 is reserved for local/custom rules.
+
+  Levels: 0-6 informational, 7-11 noteworthy, 12-15 critical.
+  Active response is wired on the rules marked with <action> below.
+-->
+<group name="tpot,honeypot,">
+
+  <!-- ================= COWRIE (SSH/Telnet) ================= -->
+  <rule id="100100" level="3">
+    <decoded_as>json</decoded_as>
+    <field name="eventid">cowrie.session.connect</field>
+    <description>Cowrie: new connection</description>
+  </rule>
+
+  <rule id="100101" level="5">
+    <decoded_as>json</decoded_as>
+    <field name="eventid">cowrie.login.failed</field>
+    <description>Cowrie: failed login from $(srcip)</description>
+    <mitre><id>T1110</id></mitre>
+  </rule>
+
+  <rule id="100102" level="8">
+    <decoded_as>json</decoded_as>
+    <field name="eventid">cowrie.login.success</field>
+    <description>Cowrie: ATTACKER logged in with credentials</description>
+    <mitre><id>T1078</id></mitre>
+  </rule>
+
+  <rule id="100103" level="10">
+    <decoded_as>json</decoded_as>
+    <field name="eventid">cowrie.command.input</field>
+    <description>Cowrie: attacker issued command "$(input)"</description>
+  </rule>
+
+  <!-- Correlated brute force: 8 failed logins in 120s from same IP -->
+  <rule id="100110" level="12" frequency="8" timeframe="120">
+    <if_matched_sid>100101</if_matched_sid>
+    <same_source_ip />
+    <description>Cowrie: SSH brute force from $(srcip)</description>
+    <mitre><id>T1110</id></mitre>
+    <action>block-ip</action>
+  </rule>
+
+  <!-- ================= DIONAEA (malware) ================= -->
+  <rule id="100200" level="8">
+    <decoded_as>json</decoded_as>
+    <field name="type">dionaea</field>
+    <field name="connection.transport">smb</field>
+    <description>Dionaea: SMB interaction (possible exploit/malware)</description>
+  </rule>
+
+  <rule id="100210" level="13">
+    <decoded_as>json</decoded_as>
+    <field name="type">dionaea</field>
+    <field name="connection.protocol">http</field>
+    <description>Dionaea: HTTP malware download / C2 from $(srcip)</description>
+    <mitre><id>T1105</id></mitre>
+    <action>block-ip</action>
+  </rule>
+
+  <!-- ================= SURICATA (IDS) ================= -->
+  <rule id="100300" level="10">
+    <decoded_as>json</decoded_as>
+    <field name="event_type">alert</field>
+    <description>Suricata: $(alert.signature)</description>
+    <mitre><id>T1190</id></mitre>
+  </rule>
+
+  <!-- ================= MULTI-HONEYPOT ATTACKER ================= -->
+  <rule id="100900" level="14" frequency="5" timeframe="300">
+    <if_matched_group>tpot</if_matched_group>
+    <same_source_ip />
+    <description>SOC: single source hit 5+ honeypot events in 5 min — high priority</description>
+    <mitre><id>T1595</id></mitre>
+    <action>block-ip</action>
+  </rule>
+
+</group>

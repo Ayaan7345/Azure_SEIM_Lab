@@ -1,0 +1,221 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "metadata": {
+        "title": "Honeypot SOC - Block Attacker IP in NSG",
+        "description": "Incident-triggered Sentinel playbook. Takes every IP entity in the incident and adds a Deny rule for it to the honeypot's Network Security Group, then comments on the incident.",
+        "prerequisites": [
+            "Grant the Logic App's system-assigned managed identity the 'Network Contributor' role on the honeypot NSG.",
+            "Deploy the AzureSentinel connection (this template does it with the Logic App's managed identity)."
+        ]
+    },
+    "parameters": {
+        "PlaybookName": {
+            "defaultValue": "soc-block-ip-nsg",
+            "type": "String"
+        },
+        "NSGResourceId": {
+            "type": "String",
+            "metadata": {
+                "description": "Full resource ID of the honeypot NSG, e.g. /subscriptions/<sub>/resourceGroups/honeypot-rg/providers/Microsoft.Network/networkSecurityGroups/honeyNSG"
+            }
+        },
+        "RulePriorityBase": {
+            "defaultValue": 2100,
+            "type": "Int",
+            "metadata": {
+                "description": "Deny rules are given base + (third-octet*256 + last-octet) mod 1900, i.e. 2100-3999, so they sit below allow rules but stay unique per IP."
+            }
+        }
+    },
+    "variables": {
+        "AzureSentinelConnectionName": "[concat('azuresentinel-', parameters('PlaybookName'))]"
+    },
+    "resources": [
+        {
+            "type": "Microsoft.Web/connections",
+            "apiVersion": "2016-06-01",
+            "name": "[variables('AzureSentinelConnectionName')]",
+            "location": "[resourceGroup().location]",
+            "kind": "V1",
+            "properties": {
+                "displayName": "[variables('AzureSentinelConnectionName')]",
+                "customParameterValues": {},
+                "api": {
+                    "id": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/azuresentinel')]"
+                }
+            }
+        },
+        {
+            "type": "Microsoft.Logic/workflows",
+            "apiVersion": "2017-07-01",
+            "name": "[parameters('PlaybookName')]",
+            "location": "[resourceGroup().location]",
+            "dependsOn": [
+                "[resourceId('Microsoft.Web/connections', variables('AzureSentinelConnectionName'))]"
+            ],
+            "identity": {
+                "type": "SystemAssigned"
+            },
+            "tags": {
+                "hidden-SentinelTemplateName": "soc-block-ip-nsg",
+                "hidden-SentinelTemplateVersion": "1.0"
+            },
+            "properties": {
+                "state": "Enabled",
+                "definition": {
+                    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+                    "contentVersion": "1.0.0.0",
+                    "parameters": {
+                        "$connections": {
+                            "defaultValue": {},
+                            "type": "Object"
+                        },
+                        "NSGResourceId": {
+                            "defaultValue": "[parameters('NSGResourceId')]",
+                            "type": "String"
+                        },
+                        "RulePriorityBase": {
+                            "defaultValue": "[parameters('RulePriorityBase')]",
+                            "type": "Int"
+                        }
+                    },
+                    "triggers": {
+                        "Microsoft_Sentinel_incident": {
+                            "type": "ApiConnectionWebhook",
+                            "inputs": {
+                                "body": {
+                                    "callback_url": "@{listCallbackUrl()}"
+                                },
+                                "host": {
+                                    "connection": {
+                                        "name": "@parameters('$connections')['azuresentinel']['connectionId']"
+                                    }
+                                },
+                                "path": "/incident-creation"
+                            }
+                        }
+                    },
+                    "actions": {
+                        "Entities_-_Get_IPs": {
+                            "type": "ApiConnection",
+                            "inputs": {
+                                "body": "@triggerBody()?['object']?['properties']?['relatedEntities']",
+                                "host": {
+                                    "connection": {
+                                        "name": "@parameters('$connections')['azuresentinel']['connectionId']"
+                                    }
+                                },
+                                "method": "post",
+                                "path": "/entities/ip"
+                            }
+                        },
+                        "For_each_IP": {
+                            "type": "Foreach",
+                            "foreach": "@body('Entities_-_Get_IPs')?['IPs']",
+                            "runAfter": {
+                                "Entities_-_Get_IPs": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "actions": {
+                                "Compose_RuleName": {
+                                    "type": "Compose",
+                                    "inputs": "@concat('auto-block-', replace(items('For_each_IP')?['Address'], '.', '-'))"
+                                },
+                                "Compose_Priority": {
+                                    "type": "Compose",
+                                    "runAfter": {
+                                        "Compose_RuleName": [
+                                            "Succeeded"
+                                        ]
+                                    },
+                                    "inputs": "@add(parameters('RulePriorityBase'), mod(add(mul(int(split(items('For_each_IP')?['Address'], '.')[2]), 256), int(last(split(items('For_each_IP')?['Address'], '.')))), 1900))"
+                                },
+                                "HTTP_Add_Deny_Rule": {
+                                    "type": "Http",
+                                    "runAfter": {
+                                        "Compose_Priority": [
+                                            "Succeeded"
+                                        ]
+                                    },
+                                    "inputs": {
+                                        "authentication": {
+                                            "audience": "https://management.azure.com",
+                                            "type": "ManagedServiceIdentity"
+                                        },
+                                        "method": "PUT",
+                                        "uri": "@{concat('https://management.azure.com', parameters('NSGResourceId'), '/securityRules/', outputs('Compose_RuleName'), '?api-version=2022-01-01')}",
+                                        "headers": {
+                                            "Content-Type": "application/json"
+                                        },
+                                        "body": {
+                                            "properties": {
+                                                "priority": "@outputs('Compose_Priority')",
+                                                "direction": "Inbound",
+                                                "access": "Deny",
+                                                "protocol": "*",
+                                                "sourcePortRange": "*",
+                                                "destinationPortRange": "*",
+                                                "sourceAddressPrefix": "@items('For_each_IP')?['Address']",
+                                                "destinationAddressPrefix": "*",
+                                                "description": "Blocked by Sentinel honeypot SOC playbook"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "Add_comment_to_incident": {
+                            "type": "ApiConnection",
+                            "runAfter": {
+                                "For_each_IP": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "inputs": {
+                                "body": {
+                                    "incidentArmId": "@triggerBody()?['object']?['id']",
+                                    "message": "<p>SOC playbook <b>@{workflow()?['name']}</b> blocked <b>@{length(body('Entities_-_Get_IPs')?['IPs'])}</b> attacker IP(s) in NSG <code>@{parameters('NSGResourceId')}</code>.</p>"
+                                },
+                                "host": {
+                                    "connection": {
+                                        "name": "@parameters('$connections')['azuresentinel']['connectionId']"
+                                    }
+                                },
+                                "method": "post",
+                                "path": "/Incidents/Comment"
+                            }
+                        }
+                    }
+                },
+                "parameters": {
+                    "$connections": {
+                        "value": {
+                            "azuresentinel": {
+                                "connectionId": "[resourceId('Microsoft.Web/connections', variables('AzureSentinelConnectionName'))]",
+                                "connectionName": "[variables('AzureSentinelConnectionName')]",
+                                "connectionProperties": {
+                                    "authentication": {
+                                        "type": "ManagedServiceIdentity"
+                                    }
+                                },
+                                "id": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/azuresentinel')]"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    ],
+    "outputs": {
+        "playbookResourceId": {
+            "type": "string",
+            "value": "[resourceId('Microsoft.Logic/workflows', parameters('PlaybookName'))]"
+        },
+        "playbookPrincipalId": {
+            "type": "string",
+            "value": "[reference(resourceId('Microsoft.Logic/workflows', parameters('PlaybookName')), '2017-07-01', 'full').identity.principalId]"
+        }
+    }
+}

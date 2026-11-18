@@ -1,0 +1,32 @@
+<!--
+  T-Pot decoders — OPTIONAL scaffolding.
+
+  T-Pot ships honeypot logs as JSON, and Wazuh's built-in JSON decoder
+  (ruleset/decoders/0006-json_decoders.xml) already parses them. The rules in
+  tpot_rules.xml therefore key off <decoded_as>json</decoded_as> + <field>
+  matching and work WITHOUT this file.
+
+  Keep this file only if you later need to rename/normalise specific fields
+  (e.g. coerce src_ip -> srcip) for correlation. It is not required to start.
+  Install to: /var/ossec/etc/decoders/tpot_decoders.xml
+-->
+<decoder name="tpot-cowrie">
+  <prematch>cowrie</prematch>
+  <plugin_decoder>JSON_Decoder</plugin_decoder>
+</decoder>
+
+<decoder name="tpot-cowrie-srcip">
+  <parent>tpot-cowrie</parent>
+  <regex>"src_ip":\s*"(\S+)"</regex>
+  <order>srcip</order>
+</decoder>
+
+<decoder name="tpot-dionaea">
+  <prematch>dionaea</prematch>
+  <plugin_decoder>JSON_Decoder</plugin_decoder>
+</decoder>
+
+<decoder name="tpot-honeytrap">
+  <prematch>honeytrap</prematch>
+  <plugin_decoder>JSON_Decoder</plugin_decoder>
+</decoder>
